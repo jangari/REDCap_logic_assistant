@@ -2,8 +2,6 @@
 
 This REDCap External Module adds an AI-powered assistant to REDCap's logic editor. Project designers describe the logic they need in plain language, such as *"show this field if the participant is over 65 and reported a fall at baseline"*. The module then suggests logic built from the project's own fields, choice codes, events and repeating instruments.
 
-<!-- TODO: add screencast.gif -->
-
 The assistant is available in every logic editor popup in a project. It knows the rules for each of the following kinds of logic:
 
 - branching logic
