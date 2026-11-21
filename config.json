@@ -1,0 +1,56 @@
+{
+	"name": "Logic Assistant",
+	"namespace": "Intersect\\LogicAssistant",
+	"description": "Adds an AI-powered <b>Suggest logic</b> assistant to REDCap's logic editor, using the GenAI service configured for the project. Describe what you need in plain language and the module suggests branching logic, a calculation, a report filter, or ASI/alert logic, built from the project's own fields, events and repeating instruments. Only project metadata is sent to the AI service; no record data is ever sent. Suggestions are validated before they are shown and are never applied automatically.",
+	"documentation": "README.md",
+	"framework-version": 17,
+	"authors": [
+		{
+			"name": "Aidan Wilson",
+			"email": "aidan@intersect.org.au",
+			"institution": "Intersect Australia"
+		}
+	],
+	"compatibility": {
+		"php-version-min": "8.0.0",
+		"redcap-version-min": "17.0.1"
+	},
+	"auth-ajax-actions": [
+		"suggest"
+	],
+	"system-settings": [
+		{
+			"key": "provider-heading",
+			"name": "<b>AI service</b><br>The module uses whichever GenAI service is configured at the system level, or the project's override if one is set. If GenAI isn't enabled for a project, the assistant does not appear.",
+			"type": "descriptive"
+		},
+		{
+			"key": "require-design-rights",
+			"name": "Only show the assistant to users with Project Design and Setup rights",
+			"type": "checkbox"
+		},
+		{
+			"key": "max-context-chars",
+			"name": "Maximum characters of project metadata sent per request<br><span class='text-muted'>Default 60000. On large projects, field detail is cut down to fit.</span>",
+			"type": "text"
+		},
+		{
+			"key": "daily-token-limit",
+			"name": "Daily AI token limit per project<br><span class='text-muted'>The total tokens (input and output) each project may use per day, resetting at midnight server time. Leave blank or enter 0 for no limit. Super users can override this for individual projects.</span>",
+			"type": "text"
+		}
+	],
+	"project-settings": [
+		{
+			"key": "project-guidance",
+			"name": "Project-specific guidance for the assistant (optional)<br><span class='text-muted'>e.g. naming conventions, or 'Missing data is coded as -99'. This is added to every request from this project.</span>",
+			"type": "textarea"
+		},
+		{
+			"key": "project-daily-token-limit",
+			"name": "Daily AI token limit for this project (super users only)<br><span class='text-muted'>Overrides the system-level limit for this project. Leave blank to use the system limit; enter 0 for no limit.</span>",
+			"type": "text",
+			"super-users-only": true
+		}
+	]
+}
