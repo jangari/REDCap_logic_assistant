@@ -35,6 +35,11 @@
 			"type": "text"
 		},
 		{
+			"key": "site-daily-token-limit",
+			"name": "Daily AI token limit for the whole site<br><span class='text-muted'>The total tokens (input and output) the Logic Assistant may use per day across all projects, resetting at midnight server time. Applies alongside the per-project limit below. Leave blank or enter 0 for no limit.</span>",
+			"type": "text"
+		},
+		{
 			"key": "daily-token-limit",
 			"name": "Daily AI token limit per project<br><span class='text-muted'>The total tokens (input and output) each project may use per day, resetting at midnight server time. Leave blank or enter 0 for no limit. Super users can override this for individual projects.</span>",
 			"type": "text"
@@ -48,7 +53,7 @@
 		},
 		{
 			"key": "project-daily-token-limit",
-			"name": "Daily AI token limit for this project (super users only)<br><span class='text-muted'>Overrides the system-level limit for this project. Leave blank to use the system limit; enter 0 for no limit.</span>",
+			"name": "Daily AI token limit for this project (super users only)<br><span class='text-muted'>Overrides the system-level per-project limit for this project. Leave blank to use the system limit; enter 0 for no per-project limit. The site-wide limit still applies.</span>",
 			"type": "text",
 			"super-users-only": true
 		}

@@ -169,6 +169,31 @@ TXT;
 		return implode("\n\n", $parts);
 	}
 
+	/**
+	 * For projects too large to describe whole: ask which instruments the request needs, so that only those are
+	 * described in full. Only used on large projects; see LogicAssistant::describeProject().
+	 */
+	public static function routingSystemPrompt(string $context): string
+	{
+		$kind = self::CONTEXTS[self::normaliseContext($context)][0];
+		return <<<TXT
+You help write REDCap logic (kind of logic: $kind). The project is too large to describe in full, so first choose which of its instruments are needed to write the logic the user is asking for. Those instruments will then be described in full: every field's type, label and choice codes.
+
+The user will give you the list of the project's instruments, with their fields, followed by their request.
+
+Include every instrument that holds a field the logic might need, including fields the user describes in their own words rather than by variable name. When unsure, include the instrument: an extra instrument costs little, while a missing one means the logic cannot be written correctly.
+
+Respond with ONLY a JSON object, with no markdown code fences and no other text, in exactly this shape:
+{"instruments": ["<form name>", ...]}
+Use only form names from the list.
+TXT;
+	}
+
+	public static function routingUserMessage(string $instrumentIndex, string $request, string $existingLogic, string $guidance, array $location): string
+	{
+		return self::userMessage("## Instruments (form name | label | fields)\n" . $instrumentIndex, $request, $existingLogic, $guidance, $location);
+	}
+
 	public static function retryMessage(string $originalMessage, string $previousLogic, array $errors): string
 	{
 		return $originalMessage

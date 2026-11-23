@@ -81,12 +81,7 @@ class LogicAssistant extends AbstractExternalModule
 			'event' => $this->cleanName($this->stringParam($payload, 'event')),
 		];
 
-		$tokenLimit = $this->getDailyTokenLimit();
-		$tokensUsedToday = $tokenLimit > 0 ? $this->getTokensUsedToday($projectId) : 0;
-		if ($tokenLimit > 0 && $tokensUsedToday >= $tokenLimit) {
-			throw new UserFacingException('This project has reached its daily usage limit for the Logic Assistant. '
-				. 'The limit resets at midnight (server time). Contact your REDCap administrator if you need it raised.');
-		}
+		$tokenBudget = $this->remainingTokenBudget($projectId); // null = no limit; throws if a limit is already reached
 
 		$maxChars = (int)$this->getSystemSetting('max-context-chars');
 		if ($maxChars <= 0) $maxChars = ProjectContext::DEFAULT_MAX_CHARS;
@@ -95,26 +90,26 @@ class LogicAssistant extends AbstractExternalModule
 		$validator = new LogicValidator($projectContext, $projectId);
 		$client = new AIClient();
 
+		$guidance = (string)$this->getProjectSetting('project-guidance');
 		$systemPrompt = PromptBuilder::systemPrompt($context);
-		$userMessage = PromptBuilder::userMessage(
-			$projectContext->build($request, $maxChars),
-			$request,
-			$existingLogic,
-			(string)$this->getProjectSetting('project-guidance'),
-			$location
-		);
 
-		$message = $userMessage;
 		$result = null;
 		$check = ['errors' => [], 'warnings' => []];
 		$attemptsMade = 0;
 		$tokens = 0;
+		$routing = 'none';
 		$succeeded = false;
 		try {
+			$description = $this->describeProject($projectContext, $client, $context, $request, $existingLogic, $guidance, $location, $maxChars);
+			$tokens += $description['tokens'];
+			$routing = $description['routing'];
+			$userMessage = PromptBuilder::userMessage($description['text'], $request, $existingLogic, $guidance, $location);
+			$message = $userMessage;
+
 			for ($attempt = 1; $attempt <= self::MAX_ATTEMPTS; $attempt++) {
-				// Don't start a correction attempt once the project is over its daily limit; show what we have
-				if ($attempt > 1 && $tokenLimit > 0 && $tokensUsedToday + $tokens >= $tokenLimit) {
-					$check['warnings'][] = 'No further corrections were attempted because this project has reached its daily usage limit for the Logic Assistant.';
+				// Don't start a correction attempt once a daily limit is reached; show what we have
+				if ($attempt > 1 && $tokenBudget !== null && $tokens >= $tokenBudget) {
+					$check['warnings'][] = 'No further corrections were attempted because the daily usage limit for the Logic Assistant has been reached.';
 					break;
 				}
 				$attemptsMade = $attempt;
@@ -141,6 +136,7 @@ class LogicAssistant extends AbstractExternalModule
 				'valid' => ($succeeded && empty($check['errors'])) ? 1 : 0,
 				'outcome' => $succeeded ? 'ok' : 'error',
 				'tokens' => $tokens,
+				'routing' => $routing,
 				'ai_service' => $client->getServiceName(),
 			]);
 		}
@@ -156,16 +152,69 @@ class LogicAssistant extends AbstractExternalModule
 	}
 
 	/**
+	 * The project description to send with the request.
+	 *
+	 * Most projects fit within the size limit whole, and nothing more is needed. For a project that doesn't, the AI
+	 * is first asked which instruments the request needs (sending only the instruments and their field names), and
+	 * those are described in full. Instruments named in the request or the existing logic, and the instrument open
+	 * in the Online Designer, are always included. If the AI can't choose, the older trimming is used instead.
+	 *
+	 * @return array{text: string, routing: string, tokens: int} routing: 'none' (whole project sent), 'ai' or 'fallback'
+	 */
+	private function describeProject(ProjectContext $projectContext, AIClient $client, string $context, string $request,
+									 string $existingLogic, string $guidance, array $location, int $maxChars): array
+	{
+		$whole = $projectContext->buildWhole($maxChars);
+		if ($whole !== null) return ['text' => $whole, 'routing' => 'none', 'tokens' => 0];
+
+		$forms = $projectContext->formsNamedIn($request . "\n" . $existingLogic);
+		if ($location['instrument'] !== '' && $projectContext->hasForm($location['instrument'])) {
+			$forms[] = $location['instrument'];
+		}
+
+		$tokens = 0;
+		try {
+			$reply = $client->complete(
+				PromptBuilder::routingSystemPrompt($context),
+				PromptBuilder::routingUserMessage($projectContext->instrumentIndex($maxChars), $request, $existingLogic, $guidance, $location)
+			);
+			$tokens = $reply['tokens'];
+			$chosen = $this->extractJson($reply['text'])['instruments'] ?? null;
+			$chosen = is_array($chosen) ? array_filter($chosen, function ($form) use ($projectContext) {
+				return is_string($form) && $projectContext->hasForm($form);
+			}) : [];
+			if (!empty($chosen)) {
+				return [
+					'text' => $projectContext->buildForForms(array_unique(array_merge($forms, $chosen)), $maxChars),
+					'routing' => 'ai',
+					'tokens' => $tokens,
+				];
+			}
+		} catch (UserFacingException $e) {
+			// The AI service failed or replied with nothing usable; fall back below. If the service is down,
+			// the main request will fail too and report the error.
+		}
+		$text = empty($forms) ? $projectContext->build($request, $maxChars) : $projectContext->buildForForms($forms, $maxChars);
+		return ['text' => $text, 'routing' => 'fallback', 'tokens' => $tokens];
+	}
+
+	/**
 	 * Models occasionally wrap JSON in code fences or add stray text; extract the outermost object.
 	 */
-	private function parseModelJson(string $text): array
+	private function extractJson(string $text): ?array
 	{
 		$text = trim($text);
 		$text = preg_replace('/^```(?:json)?\s*|\s*```$/i', '', $text) ?? $text;
 		$start = strpos($text, '{');
 		$end = strrpos($text, '}');
 		$decoded = ($start !== false && $end !== false) ? json_decode(substr($text, $start, $end - $start + 1), true) : null;
-		if (!is_array($decoded)) {
+		return is_array($decoded) ? $decoded : null;
+	}
+
+	private function parseModelJson(string $text): array
+	{
+		$decoded = $this->extractJson($text);
+		if ($decoded === null) {
 			throw new UserFacingException('The AI service returned a response that could not be read. Please try again.');
 		}
 		foreach (['logic', 'explanation', 'clarification'] as $key) {
@@ -196,10 +245,38 @@ class LogicAssistant extends AbstractExternalModule
 	}
 
 	/**
+	 * Tokens still available today under the project's limit and the site-wide limit, whichever is lower,
+	 * or null if neither limit is set. Throws if either limit has already been reached.
+	 */
+	private function remainingTokenBudget(int $projectId): ?int
+	{
+		$remaining = null;
+		$projectLimit = $this->getProjectTokenLimit();
+		if ($projectLimit > 0) {
+			$left = $projectLimit - $this->getTokensUsedToday($projectId);
+			if ($left <= 0) {
+				throw new UserFacingException('This project has reached its daily usage limit for the Logic Assistant. '
+					. 'The limit resets at midnight (server time). Contact your REDCap administrator if you need it raised.');
+			}
+			$remaining = $left;
+		}
+		$siteLimit = $this->parseLimit($this->getSystemSetting('site-daily-token-limit')) ?? 0;
+		if ($siteLimit > 0) {
+			$left = $siteLimit - $this->getTokensUsedToday(null);
+			if ($left <= 0) {
+				throw new UserFacingException('The Logic Assistant has reached its daily usage limit for this REDCap site. '
+					. 'The limit resets at midnight (server time). Contact your REDCap administrator if you need it raised.');
+			}
+			$remaining = $remaining === null ? $left : min($remaining, $left);
+		}
+		return $remaining;
+	}
+
+	/**
 	 * The daily token limit in effect for the current project: the project override if a super user
 	 * has set one, otherwise the system setting. 0 means no limit.
 	 */
-	private function getDailyTokenLimit(): int
+	private function getProjectTokenLimit(): int
 	{
 		$override = $this->parseLimit($this->getProjectSetting('project-daily-token-limit'));
 		if ($override !== null) return $override;
@@ -213,18 +290,20 @@ class LogicAssistant extends AbstractExternalModule
 		return ctype_digit($value) ? (int)$value : null;
 	}
 
-	/** Tokens used by the project since midnight, server time, from the module's own log. */
-	private function getTokensUsedToday(int $projectId): int
+	/**
+	 * Tokens used since midnight, server time, from the module's own log: by one project, or across the
+	 * whole site if $projectId is null. (Naming project_id in the query stops the framework limiting it
+	 * to the current project.)
+	 */
+	private function getTokensUsedToday(?int $projectId): int
 	{
-		$result = $this->queryLogs(
-			'select tokens where message = ? and project_id = ? and timestamp >= ?',
-			[self::LOG_MESSAGE, $projectId, date('Y-m-d 00:00:00')]
-		);
-		$total = 0;
-		while ($row = $result->fetch_assoc()) {
-			$total += (int)$row['tokens'];
-		}
-		return $total;
+		$today = date('Y-m-d 00:00:00');
+		$result = $projectId === null
+			? $this->queryLogs('select sum(tokens) as total where message = ? and project_id is not null and timestamp >= ?',
+				[self::LOG_MESSAGE, $today])
+			: $this->queryLogs('select sum(tokens) as total where message = ? and project_id = ? and timestamp >= ?',
+				[self::LOG_MESSAGE, $projectId, $today]);
+		return (int)($result->fetch_assoc()['total'] ?? 0);
 	}
 
 	/** A string value from the browser payload; anything else (arrays, objects) is treated as blank. */

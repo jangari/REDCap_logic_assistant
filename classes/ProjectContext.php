@@ -7,9 +7,11 @@ namespace Intersect\LogicAssistant;
  *
  * Only METADATA is included - never record data.
  *
- * If the full description exceeds the character budget, field detail is reduced in stages
- * (drop field notes/labels on lengthy choice lists, then drop choice labels, then drop fields
- * from instruments the user did not mention) so the request still fits.
+ * Most projects fit within the character budget whole (dropping choice labels if needed). For larger
+ * projects, LogicAssistant asks the AI which instruments a request needs (using instrumentIndex()) and
+ * then calls buildForForms(), which gives full field detail for those instruments and only field names
+ * for the rest. build() is the fallback when the AI can't be asked: it focuses on the instruments the
+ * request names, and as a last resort cuts the description short.
  */
 class ProjectContext
 {
@@ -57,21 +59,110 @@ class ProjectContext
 		return array_values($this->uniqueEventNames);
 	}
 
+	public function hasForm(string $form): bool
+	{
+		return isset($this->forms[$form]);
+	}
+
+	/** The description of the whole project if it fits within $maxChars, otherwise null. */
+	public function buildWhole(int $maxChars): ?string
+	{
+		foreach (['full', 'no_choice_labels'] as $level) {
+			$text = $this->render($level, null);
+			if (mb_strlen($text) <= $maxChars) return $text;
+		}
+		return null;
+	}
+
 	/**
-	 * @param string $userRequest Used to prioritise instruments/fields the user mentioned when trimming.
+	 * Full field detail for the given instruments; every other instrument lists only its field names.
+	 * @param string[] $forms
+	 */
+	public function buildForForms(array $forms, int $maxChars): string
+	{
+		$focus = [];
+		foreach ($forms as $form) {
+			if ($this->hasForm($form)) $focus[$form] = true;
+		}
+		foreach (['full', 'no_choice_labels'] as $level) {
+			$text = $this->render($level, $focus);
+			if (mb_strlen($text) <= $maxChars) return $text;
+		}
+		return $this->truncate($text, $maxChars);
+	}
+
+	/**
+	 * Fallback when the AI can't choose the instruments: focus on the instruments the request names
+	 * (or whose fields it names); if it names none, send everything and cut it short.
 	 */
 	public function build(string $userRequest, int $maxChars = self::DEFAULT_MAX_CHARS): string
 	{
-		// Progressively cheaper renderings of the field list until it fits
-		foreach (['full', 'no_choice_labels', 'mentioned_forms_only'] as $level) {
-			$text = $this->render($level, $userRequest);
-			if (mb_strlen($text) <= $maxChars) return $text;
-		}
-		// Last resort: hard cut, with a note so the model knows the list is incomplete
-		return mb_substr($text, 0, $maxChars) . "\n[... field list truncated to fit the request size limit ...]\n";
+		$whole = $this->buildWhole($maxChars);
+		if ($whole !== null) return $whole;
+		$named = $this->formsNamedIn($userRequest);
+		if (!empty($named)) return $this->buildForForms($named, $maxChars);
+		return $this->truncate($this->render('no_choice_labels', null), $maxChars);
 	}
 
-	private function render(string $level, string $userRequest): string
+	/**
+	 * Instruments whose form name, label or field names appear in the text (e.g. the request, or logic
+	 * already in the editor). Names are matched as whole words, so a short form name like "bp" doesn't
+	 * match inside other words.
+	 * @return string[]
+	 */
+	public function formsNamedIn(string $text): array
+	{
+		$forms = [];
+		preg_match_all('/[a-z][a-z0-9_]*/i', $text, $m);
+		foreach (array_unique(array_map('strtolower', $m[0])) as $word) {
+			if (isset($this->forms[$word])) $forms[$word] = true;
+			$form = $this->metadata[$word]['form_name'] ?? null;
+			if ($form !== null && isset($this->forms[$form])) $forms[$form] = true;
+		}
+		foreach ($this->forms as $form => $formInfo) {
+			$label = $this->clean($formInfo['menu'] ?? '');
+			if (mb_strlen($label) >= 4 && stripos($text, $label) !== false) $forms[$form] = true;
+		}
+		return array_keys($forms);
+	}
+
+	/**
+	 * A short list of the instruments, for the AI to choose from: name, label and fields.
+	 * Detail is dropped in stages (field labels, then field names) to fit within $maxChars.
+	 */
+	public function instrumentIndex(int $maxChars): string
+	{
+		foreach (['labels', 'names', 'forms_only'] as $level) {
+			$out = [];
+			foreach ($this->forms as $form => $formInfo) {
+				$fields = array_keys($formInfo['fields'] ?? []);
+				$line = "- $form | " . $this->clean($formInfo['menu'] ?? $form) . ' | ' . count($fields) . ' fields';
+				if ($level === 'labels') {
+					$line .= ': ' . implode('; ', array_map(function ($f) {
+						return $f . ' (' . $this->clean($this->metadata[$f]['element_label'] ?? '', 40) . ')';
+					}, $fields));
+				} elseif ($level === 'names') {
+					$line .= ': ' . implode(', ', $fields);
+				}
+				$out[] = $line;
+			}
+			$text = implode("\n", $out) . "\n";
+			if (mb_strlen($text) <= $maxChars) return $text;
+		}
+		return $this->truncate($text, $maxChars);
+	}
+
+	private function truncate(string $text, int $maxChars): string
+	{
+		// A note so the model knows the list is incomplete
+		return mb_substr($text, 0, $maxChars) . "\n[... project description cut short to fit the request size limit ...]\n";
+	}
+
+	/**
+	 * @param array|null $focus form => true for the instruments to describe in full; null for all of them.
+	 *   The focus instruments come first, so if the description must be cut short, the others are what's lost.
+	 */
+	private function render(string $level, ?array $focus): string
 	{
 		$out = [];
 		$out[] = '## Project structure';
@@ -100,7 +191,6 @@ class ProjectContext
 		// Instruments
 		$out[] = '';
 		$out[] = '## Instruments (form name | label | repeating?)';
-		$mentionedForms = [];
 		foreach ($this->forms as $form => $formInfo) {
 			$repeatingIn = [];
 			foreach ($repeating as $eventId => $value) {
@@ -109,26 +199,27 @@ class ProjectContext
 				}
 			}
 			$repeatText = empty($repeatingIn) ? 'no' : ($this->isLongitudinal() ? 'REPEATING INSTRUMENT in ' . implode(', ', $repeatingIn) : 'REPEATING INSTRUMENT');
-			$label = $this->clean($formInfo['menu'] ?? $form);
-			$out[] = "- $form | $label | $repeatText";
-			if (stripos($userRequest, $form) !== false || ($label !== '' && stripos($userRequest, $label) !== false)) {
-				$mentionedForms[$form] = true;
-			}
+			$out[] = "- $form | " . $this->clean($formInfo['menu'] ?? $form) . " | $repeatText";
 		}
 
-		// Fields, grouped by instrument
+		// Fields, grouped by instrument: the focus instruments in full, then the rest by name only
 		$out[] = '';
 		$out[] = '## Fields by instrument (variable | type[, validation] | label | choices as code=label)';
 		foreach ($this->forms as $form => $formInfo) {
-			if ($level === 'mentioned_forms_only' && !empty($mentionedForms) && !isset($mentionedForms[$form])) {
-				$out[] = "### $form (fields omitted for length: " . implode(', ', array_keys($formInfo['fields'] ?? [])) . ')';
-				continue;
-			}
+			if ($focus !== null && !isset($focus[$form])) continue;
 			$out[] = "### $form";
 			foreach (array_keys($formInfo['fields'] ?? []) as $field) {
 				$attr = $this->metadata[$field] ?? null;
 				if ($attr === null) continue;
 				$out[] = $this->renderField($field, $attr, $level);
+			}
+		}
+		if ($focus !== null) {
+			$out[] = '';
+			$out[] = '## Other instruments (field names only, detail omitted for length)';
+			foreach ($this->forms as $form => $formInfo) {
+				if (isset($focus[$form])) continue;
+				$out[] = "- $form: " . implode(', ', array_keys($formInfo['fields'] ?? []));
 			}
 		}
 

@@ -2,6 +2,8 @@
 
 This REDCap External Module adds an AI-powered assistant to REDCap's logic editor. Project designers describe the logic they need in plain language, such as *"show this field if the participant is over 65 and reported a fall at baseline"*. The module then suggests logic built from the project's own fields, choice codes, events and repeating instruments.
 
+<img src="logic_assistant.png" width="600" alt="The Logic Editor dialogue with the Logic Assistant panel open. The request 'Display if the participant is aged 18 years or older' has produced the suggestion datediff([dob], &quot;today&quot;, &quot;y&quot;, true) &gt;= 18, with an AI-generated notice, an explanation, assumptions, and buttons to replace the editor contents, insert at the cursor, or copy.">
+
 The assistant is available in every logic editor popup in a project. It knows the rules for each of the following kinds of logic:
 
 - branching logic
@@ -77,11 +79,14 @@ In Draft Mode, the draft version of the fields is sent.
 
 **No record data is ever sent.**
 
-On large projects, the metadata is trimmed to fit the configured size limit, in this order:
+On large projects, the metadata is trimmed to fit the configured size limit:
 
 1. Choice labels are reduced to choice codes.
-2. Fields on instruments the request doesn't mention are left out.
-3. If it still doesn't fit, the text is cut off.
+2. If it still doesn't fit, the assistant first makes a smaller request to the AI service to choose the instruments the request needs. That request sends only the instruments, their field names and short field labels, along with the request itself. The chosen instruments are then described in full. Other instruments list only their field names. Instruments named in the request or in the existing logic, and the instrument open in the Online Designer, are always included.
+3. If the instruments can't be chosen this way, the instruments the request names are described in full instead.
+4. If it still doesn't fit, the text is cut off. The instruments described in full come first, so the field-name lists are cut first.
+
+Projects that fit within the limit are sent whole, with no extra request.
 
 ## Configuration
 
@@ -91,6 +96,7 @@ On large projects, the metadata is trimmed to fit the configured size limit, in 
 | --- | --- | --- |
 | Only show the assistant to users with Project Design and Setup rights | false | If checked, only users with Design rights (and super users) see the assistant. Otherwise, all project users who can open the logic editor see it, including on report and alert pages. |
 | Maximum characters of project metadata sent per request | 60000 | Upper limit on the size of the project description sent with each request. Larger projects are trimmed as described above. |
+| Daily AI token limit for the whole site | (no limit) | Total tokens, input and output, that the module may use per day across all projects. Blank or 0 means no limit. See [Usage limits](#usage-limits). |
 | Daily AI token limit per project | (no limit) | Total tokens, input and output, that each project may use per day. Blank or 0 means no limit. See [Usage limits](#usage-limits). |
 
 ### Project settings
@@ -98,16 +104,21 @@ On large projects, the metadata is trimmed to fit the configured size limit, in 
 | Setting | Default Value | Description |
 | --- | --- | --- |
 | Project-specific guidance | | Optional notes added to every request from the project, e.g. *"Missing data is coded as -99"*, or *"The [group] field is populated by randomisation"*. |
-| Daily AI token limit for this project | (system limit) | **Super users only.** Overrides the system-level daily token limit for this project. Blank uses the system limit; 0 means no limit. |
+| Daily AI token limit for this project | (system limit) | **Super users only.** Overrides the system-level per-project daily token limit for this project. Blank uses the system limit; 0 means no per-project limit. The site-wide limit still applies. |
 
 ### Usage limits
 
-Each request can make up to three calls to the AI service: the first suggestion, and up to two corrections if it fails validation. Each call includes the project's metadata, so a request on a large project can use tens of thousands of tokens.
+Each request can make up to three calls to the AI service: the first suggestion, and up to two corrections if it fails validation. On projects too large to send whole, there is one extra, smaller call first to choose the instruments needed. Each call includes the project's metadata, so a request on a large project can use tens of thousands of tokens.
 
-To control cost, administrators can set a daily token limit per project. The module adds up the tokens recorded in its log for the project since midnight, server time:
+To control cost, administrators can set two daily token limits, and both apply:
 
-- Once a project reaches its limit, further requests are refused until the next day.
-- If a project reaches its limit during a request, no further corrections are attempted. The suggestion so far is shown with a note saying so. A project can therefore go over its limit by up to one request's usage.
+- **Site-wide:** the total for all projects on the REDCap site combined.
+- **Per project:** the total for each project. Super users can override it for individual projects.
+
+The module adds up the tokens recorded in its log since midnight, server time, for the project and for the whole site:
+
+- Once either limit is reached, further requests are refused until the next day. The message says which limit was reached.
+- If a limit is reached during a request, no further corrections are attempted. The suggestion so far is shown with a note saying so. A project, or the site, can therefore go over its limit by up to one request's usage.
 
 Token counts are taken from the usage reported by the AI service. If the service doesn't report usage, the module estimates it at about four characters per token.
 
@@ -119,7 +130,8 @@ Each request is recorded in the module's log with:
 - the number of attempts
 - whether the final suggestion passed validation
 - whether the request completed or failed
-- the number of tokens used, which counts towards the daily limit
+- whether the project was sent whole or the instruments were chosen first
+- the number of tokens used, which counts towards the daily limits
 - which type of GenAI service was used (OpenAI or Gemini)
 
 The text of the request and the generated logic are **not** logged.
